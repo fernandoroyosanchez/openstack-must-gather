@@ -85,18 +85,19 @@ gather_node_sos () {
     #   tar concatenated to the sos report. sos gathers them itself via the
     #   container_log plugin (see SOS_PLUGIN_OPTS above), so we produce a single
     #   archive and let sos deal with files disappearing mid log rotation.
-    oc debug "node/$node" -- chroot /host bash \
+    #
+    # oc debug can exit non-zero after the remote command has finished, e.g.
+    # "UntilWithSync: unable to sync caches: context deadline exceeded" while
+    # removing the debug pod, so its exit code doesn't tell whether sos
+    # succeeded. The retrieved archive is checked instead.
+    if ! oc debug "node/$node" -- chroot /host bash \
       -c "echo 'TOOLBOX_NAME=toolbox-osp' > /root/.toolboxrc ; \
           rm -rf \"${TMPDIR}\" && \
           mkdir -p \"${TMPDIR}\" && \
           sudo podman rm --force toolbox-osp;  \
           sudo --preserve-env podman pull --authfile /var/lib/kubelet/config.json $SUPPORT_TOOLS && \
-          toolbox sos report --batch --all-logs $SOS_LIMIT $SOS_PLUGIN_OPTS --tmp-dir=\"/host${TMPDIR}\""
-
-    # shellcheck disable=SC2181
-    if [ $? -ne 0 ]; then
-        echo "Failed to run sos report on node ${node}, won't retrieve data"
-        return 1
+          toolbox sos report --batch --all-logs $SOS_LIMIT $SOS_PLUGIN_OPTS --tmp-dir=\"/host${TMPDIR}\""; then
+        echo "oc debug returned an error generating the SOS report on node ${node}, trying to retrieve it anyway"
     fi
 
     # Wait until we know for sure the debug pod is gone, this is to try to
@@ -117,9 +118,14 @@ gather_node_sos () {
     # Add "--loglevel 6" to help debug in case there's a failure
     oc debug --loglevel 6 "node/$node" -- bash -c "cat \"/host${TMPDIR}/\"*.tar.xz" 2> "${download_logs}" 1> "${sos_file}"
 
-    # shellcheck disable=SC2181
-    if [ $? -ne 0 ]; then
-        echo "Failed to download sosreport-$node.tar.xz not deleting file"
+    if [[ ! -s "${sos_file}" ]]; then
+        echo "No SOS report retrieved for node ${node}, see ${download_logs}"
+        rm -f "${sos_file}"
+        return 1
+    fi
+
+    if ! xz -t "${sos_file}" 2>/dev/null; then
+        echo "Retrieved SOS report for node ${node} is incomplete, keeping it and ${download_logs}"
         return 1
     fi
 
